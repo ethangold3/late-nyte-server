@@ -8,10 +8,10 @@ const gameSessionSchema = new mongoose.Schema({
   }],
   rounds: [{
     roundNumber: { type: Number, required: true },
-    newsPrompts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'NewsPrompt' }],
+    newsPrompts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'NewsArticle' }],
     assignments: [{
       player: { type: String, required: true },
-      prompts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'NewsPrompt' }]
+      prompts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'NewsArticle' }]
     }],
     punchlines: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Punchline' }],
     votes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Vote' }]
@@ -22,6 +22,8 @@ const gameSessionSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   endedAt: { type: Date }
 });
+
+gameSessionSchema.index({ gameId: 1, 'players.username': 1 }, { unique: true });
 
 gameSessionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 86400 });
 

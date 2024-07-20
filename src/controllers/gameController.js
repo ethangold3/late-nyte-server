@@ -1,78 +1,190 @@
 const GameSession = require('../models/GameSession');
 const NewsArticle = require('../models/NewsArticle');
 const Punchline = require('../models/Punchline');
+const Vote = require('../models/Vote');
 
 // Helper function to generate a unique game ID
 const generateUniqueId = () => {
     return Math.random().toString(36).substr(2, 6).toUpperCase();
 };
 
-exports.createGame = async (req, res) => {
+const shuffleArray = (array) => {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
+};
+
+exports.createGame = async () => {
+    const newGame = new GameSession({
+        gameId: generateUniqueId(),
+        status: 'waiting',
+        totalRounds: 5 // You can make this configurable later
+    });
+    await newGame.save();
+    return {gameId : newGame.gameId};
+
+};
+
+exports.joinGame = async (gameId, username) => {
+    const game = await GameSession.findOne({ gameId });
+    if (!game) throw new Error('Game not found');
+    const existingPlayer = game.players.find(player => player.username === username);
+    if (existingPlayer) {
+      throw new Error('Username already taken in this game');
+    }
+
+    game.players.push({ username, score: 0 });
+    await game.save();
+    return {message: 'Joined game successfully'};
+};
+
+exports.startGame = async (gameId) => {
+    const game = await GameSession.findOne({ gameId });
+    if (!game) throw new Error('Game not found');
+    if (game.players.length < 3) {
+        throw new Error('Not enough Players');
+    }
+    game.status = 'in-progress';
+    game.currentRound = 1;
+    await game.save();
+    const result = await startNewRound(game);
+    return result;
+};
+
+const startNewRound = async (game) => {
+    const playerCount = game.players.length;
+    const promptCount = playerCount; // We need as many prompts as there are players
+
+    const prompts = await NewsArticle.find({ usedInGame: false }).limit(promptCount);
+    if (prompts.length < promptCount) {
+        throw new Error('Not enough unused prompts available');
+    }
+
+    const shuffledPromptIds = prompts.map(prompt => prompt._id).sort(() => Math.random() - 0.5);
+    const shuffledPlayerUsernames = game.players.map(player => player.username).sort(() => Math.random() - 0.5);
+
+
+        
+    // Create assignments in the correct format
+    const assignments = shuffledPlayerUsernames.map((username, index) => {
+        const firstPromptIndex = index;
+        const secondPromptIndex = (index + 1) % promptCount;
+        return {
+        player: username,
+        prompts: [
+            shuffledPromptIds[firstPromptIndex],
+            shuffledPromptIds[secondPromptIndex]
+        ]
+        };
+    });
+
+    
+      game.rounds.push({
+        roundNumber: game.currentRound,
+        newsPrompts: shuffledPromptIds,
+        assignments,
+        punchlines: [],
+        votes: []
+      });
+
+
+    // Mark prompts as used
+    await NewsArticle.updateMany(
+        { _id: { $in: shuffledPromptIds } },
+        { $set: { usedInGame: true } }
+    );
+
+    await game.save();
+    return game;
+};
+
+exports.nextRound = async (gameId) => {
+    const game = await GameSession.findOne({ gameId });
+    if (!game || game.status !== 'in-progress') {
+        throw new Error('Game not in progress');
+    }
+    if (game.currentRound >= game.totalRounds) {
+        game.status = 'completed';
+        game.endedAt = new Date();
+    } else {
+        game.currentRound += 1;
+        await startNewRound(game);
+    }
+
+        await game.save();
+        return { message: game.status === 'completed' ? 'Game completed' : 'Next round started' };
+};
+
+
+exports.submitVote = async (gameId, username, punchlineId) => {
+    const game = await GameSession.findOne({ gameId }).populate('rounds.newsPrompts');
+    if (!game) {
+        throw new Error('Game not found');
+    }
+
+    // 2. Get the current round
+    const currentRound = game.rounds[game.currentRound-1];
+    if (!currentRound) {
+        throw new Error('No active round found');
+    }
+    const punchline = await Punchline.findOne({
+        gameSession: game._id,
+        punchlineId: punchlineId,
+        round: game.currentRound
+      });
+    if (!punchline) {
+        throw new Error('Punchline not found in this game and round');
+    }
+
+    // 4. Check if the punchline belongs to the current round
+    if (!currentRound.punchlines.includes(punchline._id)) {
+        throw new Error('Invalid punchline for this round');
+    }
+
+    // 5. Find the news prompt associated with this punchline
+    const newsPrompt = currentRound.newsPrompts.find(prompt => 
+        punchline.newsPrompt.equals(prompt._id)
+    );
+    if (!newsPrompt) {
+        throw new Error('Associated news prompt not found');
+    }
     try {
-        const newGame = new GameSession({
-            gameId: generateUniqueId(),
-            status: 'waiting',
-            totalRounds: 5 // You can make this configurable later
+        // 6. Check if the user has already voted for this news prompt in this game
+        const existingVote = await Vote.findOne({
+          voter: username,
+          newsPrompt: newsPrompt._id,
+          gameSession: game._id,
+          round: game.currentRound
         });
-        await newGame.save();
-        res.status(201).json({ gameId: newGame.gameId });
-    } catch (error) {
-        res.status(500).json({ message: 'Error creating game', error: error.message });
-    }
-};
-
-exports.joinGame = async (req, res) => {
-    const { gameId, username } = req.body;
-    try {
-        const game = await GameSession.findOne({ gameId });
-        if (!game) {
-            return res.status(404).json({ message: 'Game not found' });
+    
+        if (existingVote) {
+          throw new Error('You have already voted for this news prompt in this round');
         }
-        if (game.status !== 'waiting') {
-            return res.status(400).json({ message: 'Game already in progress' });
-        }
-        game.players.push({ username, score: 0 });
+    
+        // 7. Create and save the new vote
+        const newVote = new Vote({
+          voter: username,
+          newsPrompt: newsPrompt._id,
+          selectedPunchline: punchline._id,
+          gameSession: game._id,
+          round: game.currentRound
+        });
+        await newVote.save();
+    
+        // 8. Update the game session
+        currentRound.votes.push(newVote._id);
         await game.save();
-        res.status(200).json({ message: 'Joined game successfully' });
-    } catch (error) {
-        res.status(500).json({ message: 'Error joining game', error: error.message });
-    }
-};
-
-exports.startGame = async (req, res) => {
-    const { gameId } = req.body;
-    try {
-        const game = await GameSession.findOne({ gameId });
-        if (!game) {
-            return res.status(404).json({ message: 'Game not found' });
+    
+        return { message: 'Vote submitted successfully' };
+      } catch (error) {
+        if (error.code === 11000) {
+          throw new Error('You have already voted for this news prompt in this round');
         }
-        if (game.players.length < 2) {
-            return res.status(400).json({ message: 'Not enough players to start' });
-        }
-        game.status = 'in-progress';
-        game.currentRound = 1;
-        // Here you would also select and add the first NewsArticle
-        await game.save();
-        res.status(200).json({ message: 'Game started successfully' });
-    } catch (error) {
-        res.status(500).json({ message: 'Error starting game', error: error.message });
-    }
-};
-
-
-exports.submitVote = async (req, res) => {
-    const { gameId, username, votedForPunchlineId } = req.body;
-    try {
-        const game = await GameSession.findOne({ gameId });
-        if (!game || game.status !== 'in-progress') {
-            return res.status(400).json({ message: 'Invalid game' });
-        }
-        // Here you would add the vote to the current round and update scores
-        res.status(200).json({ message: 'Vote submitted successfully' });
-    } catch (error) {
-        res.status(500).json({ message: 'Error submitting vote', error: error.message });
-    }
-};
+        throw error;
+      }
+    };
 
 exports.getGameState = async (req, res) => {
     const { gameId } = req.params;
@@ -102,48 +214,47 @@ exports.endGame = async (req, res) => {
         res.status(500).json({ message: 'Error ending game', error: error.message });
     }
 };
-
-exports.submitPunchline = async (req, res) => {
-    const { gameId, username, punchlineText } = req.body;
+exports.submitPunchline = async (gameId, username, newsArticleId, punchlineText) => {
+    // 1. Find the game session
+    const game = await GameSession.findOne({ gameId });
+    if (!game) {
+      throw new Error('Game not found');
+    }
+  
+    // 2. Verify the news article exists and is part of the current round
+    const currentRound = game.rounds[game.currentRound - 1];
+    if (!currentRound) {
+      throw new Error('No active round found');
+    }
+    
+    if (!currentRound.newsPrompts.includes(newsArticleId)) {
+      throw new Error('News article not found in the current round');
+    }
     try {
-        const game = await GameSession.findOne({ gameId });
-        if (!game || game.status !== 'in-progress') {
-            return res.status(400).json({ message: 'Invalid game or game not in progress' });
-        }
-
-        const currentRound = game.rounds[game.currentRound - 1];
-        if (!currentRound) {
-            return res.status(400).json({ message: 'No active round' });
-        }
-
-        // Check if user has already submitted a punchline for this round
-        const existingPunchline = await Punchline.findOne({
-            gameSession: game._id,
-            author: username,
-            newsPrompt: currentRound.newsPrompt
-        });
-
-        if (existingPunchline) {
-            return res.status(400).json({ message: 'You have already submitted a punchline for this round' });
-        }
-
-        // Create new punchline
+        // 5. Create and save the new punchline
         const newPunchline = new Punchline({
             text: punchlineText,
             author: username,
-            newsPrompt: currentRound.newsPrompt,
-            gameSession: game._id
+            newsPrompt: newsArticleId,
+            gameSession: game._id,
+            round: game.currentRound
         });
 
         await newPunchline.save();
-
-        // Add punchline to current round
+    
+        // 6. Update the game session
         currentRound.punchlines.push(newPunchline._id);
         await game.save();
-
-        res.status(201).json({ message: 'Punchline submitted successfully' });
-    } catch (error) {
-        console.error('Error submitting punchline:', error);
-        res.status(500).json({ message: 'Error submitting punchline', error: error.message });
+    
+        return { 
+        message: 'Punchline submitted successfully',
+        punchlineId: newPunchline.punchlineId
+        };
+  } catch (error) {
+    if (error.code === 11000) {
+      // This could be due to either duplicate submission or exceeding the punchline limit
+      throw new Error('You have already submitted a punchline for this news article or the maximum number of punchlines has been reached');
     }
+    throw error;
+  }
 };

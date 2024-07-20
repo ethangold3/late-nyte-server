@@ -6,8 +6,7 @@ const newsArticleSchema = new mongoose.Schema({
     source: { type: String, required: true },
     url: { type: String, required: true },
     publishedAt: { type: Date, required: true },
-    createdAt: { type: Date, default: Date.now },
-    usedInGame: { type: Boolean, default: false }
+    createdAt: { type: Date, default: Date.now }
   });
 
   
