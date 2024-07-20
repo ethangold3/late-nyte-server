@@ -2,8 +2,7 @@ require('dotenv').config({ path: '../../.env' });
 const axios = require('axios');
 const mongoose = require('mongoose');
 const NewsPrompt = require('../models/NewsArticle');
-console.log(NEWS_API_KEY);
-//const MONGODB_URI = process.env.MONGODB_URI;
+const NEWS_API_KEY = process.env.NEWS_API_KEY;
 
 function cleanHeadline(headline) {
   // Remove everything after the last dash, trim whitespace

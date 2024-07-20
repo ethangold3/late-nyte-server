@@ -2,6 +2,7 @@ const GameSession = require('../models/GameSession');
 const NewsArticle = require('../models/NewsArticle');
 const Punchline = require('../models/Punchline');
 const Vote = require('../models/Vote');
+const { io } = require('../../server');
 
 // Helper function to generate a unique game ID
 const generateUniqueId = () => {
@@ -16,7 +17,7 @@ const shuffleArray = (array) => {
     return array;
 };
 
-exports.createGame = async () => {
+exports.createGame = async (io) => {
     const newGame = new GameSession({
         gameId: generateUniqueId(),
         status: 'waiting',
@@ -27,7 +28,7 @@ exports.createGame = async () => {
 
 };
 
-exports.joinGame = async (gameId, username) => {
+exports.joinGame = async (io, gameId, username) => {
     const game = await GameSession.findOne({ gameId });
     if (!game) throw new Error('Game not found');
     const existingPlayer = game.players.find(player => player.username === username);
@@ -37,10 +38,12 @@ exports.joinGame = async (gameId, username) => {
 
     game.players.push({ username, score: 0 });
     await game.save();
+    io.to(gameId).emit('gameUpdate', game);
+    console.log(`Emitted gameUpdate for game ${gameId}`);
     return {message: 'Joined game successfully'};
 };
 
-exports.startGame = async (gameId) => {
+exports.startGame = async (io, gameId) => {
     const game = await GameSession.findOne({ gameId });
     if (!game) throw new Error('Game not found');
     if (game.players.length < 3) {
@@ -49,11 +52,12 @@ exports.startGame = async (gameId) => {
     game.status = 'in-progress';
     game.currentRound = 1;
     await game.save();
-    const result = await startNewRound(game);
+    io.to(gameId).emit('gameUpdate', game);
+    const result = await startNewRound(io, game);
     return result;
 };
 
-const startNewRound = async (game) => {
+const startNewRound = async (io, game) => {
     const playerCount = game.players.length;
     const promptCount = playerCount; // We need as many prompts as there are players
 
@@ -97,10 +101,11 @@ const startNewRound = async (game) => {
     );
 
     await game.save();
+    io.to(game.gameId).emit('gameUpdate', game);
     return game;
 };
 
-exports.nextRound = async (gameId) => {
+exports.nextRound = async (io, gameId) => {
     const game = await GameSession.findOne({ gameId });
     if (!game || game.status !== 'in-progress') {
         throw new Error('Game not in progress');
@@ -114,11 +119,12 @@ exports.nextRound = async (gameId) => {
     }
 
         await game.save();
+        io.to(gameId).emit('gameUpdate', game);
         return { message: game.status === 'completed' ? 'Game completed' : 'Next round started' };
 };
 
 
-exports.submitVote = async (gameId, username, punchlineId) => {
+exports.submitVote = async (io, gameId, username, punchlineId) => {
     const game = await GameSession.findOne({ gameId }).populate('rounds.newsPrompts');
     if (!game) {
         throw new Error('Game not found');
@@ -172,10 +178,10 @@ exports.submitVote = async (gameId, username, punchlineId) => {
           round: game.currentRound
         });
         await newVote.save();
-    
         // 8. Update the game session
         currentRound.votes.push(newVote._id);
         await game.save();
+        io.to(gameId).emit('gameUpdate', game);
     
         return { message: 'Vote submitted successfully' };
       } catch (error) {
@@ -209,12 +215,13 @@ exports.endGame = async (req, res) => {
         game.status = 'completed';
         game.endedAt = new Date();
         await game.save();
+        io.to(gameId).emit('gameUpdate', game);
         res.status(200).json({ message: 'Game ended successfully' });
     } catch (error) {
         res.status(500).json({ message: 'Error ending game', error: error.message });
     }
 };
-exports.submitPunchline = async (gameId, username, newsArticleId, punchlineText) => {
+exports.submitPunchline = async (io, gameId, username, newsArticleId, punchlineText) => {
     // 1. Find the game session
     const game = await GameSession.findOne({ gameId });
     if (!game) {
@@ -241,11 +248,10 @@ exports.submitPunchline = async (gameId, username, newsArticleId, punchlineText)
         });
 
         await newPunchline.save();
-    
         // 6. Update the game session
         currentRound.punchlines.push(newPunchline._id);
         await game.save();
-    
+        io.to(gameId).emit('gameUpdate', game);
         return { 
         message: 'Punchline submitted successfully',
         punchlineId: newPunchline.punchlineId
