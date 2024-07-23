@@ -61,12 +61,14 @@ const startNewRound = async (io, game) => {
     const playerCount = game.players.length;
     const promptCount = playerCount; // We need as many prompts as there are players
 
-    const prompts = await NewsArticle.find({ usedInGame: false }).limit(promptCount);
+    const prompts = await NewsArticle.find({}).limit(promptCount);
+    console.log('here are the prompts')
+    console.log(prompts)
     if (prompts.length < promptCount) {
         throw new Error('Not enough unused prompts available');
     }
 
-    const shuffledPromptIds = prompts.map(prompt => prompt._id).sort(() => Math.random() - 0.5);
+    const shuffledPrompts = prompts.sort(() => Math.random() - 0.5);
     const shuffledPlayerUsernames = game.players.map(player => player.username).sort(() => Math.random() - 0.5);
 
 
@@ -78,8 +80,8 @@ const startNewRound = async (io, game) => {
         return {
         player: username,
         prompts: [
-            shuffledPromptIds[firstPromptIndex],
-            shuffledPromptIds[secondPromptIndex]
+            shuffledPrompts[firstPromptIndex],
+            shuffledPrompts[secondPromptIndex]
         ]
         };
     });
@@ -87,7 +89,7 @@ const startNewRound = async (io, game) => {
     
       game.rounds.push({
         roundNumber: game.currentRound,
-        newsPrompts: shuffledPromptIds,
+        newsPrompts: shuffledPrompts,
         assignments,
         punchlines: [],
         votes: []
@@ -95,15 +97,106 @@ const startNewRound = async (io, game) => {
 
 
     // Mark prompts as used
-    await NewsArticle.updateMany(
-        { _id: { $in: shuffledPromptIds } },
-        { $set: { usedInGame: true } }
-    );
+    // await NewsArticle.updateMany(
+    //     { _id: { $in: shuffledPromptIds } },
+    //     { $set: { usedInGame: true } }
+    // );
 
     await game.save();
-    io.to(game.gameId).emit('gameUpdate', game);
+    io.to(game.gameId).emit('roundStart', {
+        roundNumber: game.currentRound,
+        assignments: assignments
+      });
+    setTimeout(() => endPunchlineSubmission(io, game), 120000);
     return game;
 };
+
+const endPunchlineSubmission = async (io, game) => {
+    const currentRound = game.rounds[game.currentRound - 1];
+  
+    // Add filler text for any missing punchlines
+    for (const assignment of currentRound.assignments) {
+      for (const promptId of assignment.prompts) {
+        const punchline = await Punchline.findOne({
+          gameSession: game._id,
+          newsPrompt: promptId,
+          author: assignment.player,
+          round: game.currentRound
+        });
+  
+        if (!punchline) {
+          const newPunchline = new Punchline({
+            text: "Time's up! No punchline submitted.",
+            author: assignment.player,
+            newsPrompt: promptId,
+            gameSession: game._id,
+            round: game.currentRound
+          });
+          await newPunchline.save();
+          currentRound.punchlines.push(newPunchline._id);
+        }
+      }
+    }
+  
+    await game.save();
+  
+    // Start voting phase
+    startVoting(io, game);
+  };
+
+  const startVoting = async (io, game) => {
+    const currentRound = game.rounds[game.currentRound - 1];
+    const prompts = await NewsArticle.find({ _id: { $in: currentRound.newsPrompts } });
+  
+    for (const prompt of prompts) {
+      const punchlines = await Punchline.find({
+        gameSession: game._id,
+        newsPrompt: prompt._id,
+        round: game.currentRound
+      });
+  
+      io.to(game.gameId).emit('votingStart', {
+        prompt: prompt,
+        options: punchlines
+      });
+  
+      // Wait for 30 seconds before moving to the next prompt
+      await new Promise(resolve => setTimeout(resolve, 30000));
+    }
+  
+    // End the round and calculate scores
+    await endRound(io, game);
+  };
+
+  const endRound = async (io, game) => {
+    const currentRound = game.rounds[game.currentRound - 1];
+  
+    // Calculate scores based on votes
+    const votes = await Vote.find({ _id: { $in: currentRound.votes } });
+    
+    for (const vote of votes) {
+      const punchline = await Punchline.findById(vote.selectedPunchline);
+      const player = game.players.find(p => p.username === punchline.author);
+      if (player) {
+        player.score += 1;
+      }
+    }
+  
+    await game.save();
+  
+    // Emit updated game state
+    io.to(game.gameId).emit('roundEnd', game);
+  
+    // Check if the game is over
+    if (game.currentRound >= game.totalRounds) {
+      await endGame(io, game);
+    } else {
+      // Start the next round
+      game.currentRound += 1;
+      await game.save();
+      await startRound(io, game);
+    }
+  };
 
 exports.nextRound = async (io, gameId) => {
     const game = await GameSession.findOne({ gameId });
@@ -181,7 +274,8 @@ exports.submitVote = async (io, gameId, username, punchlineId) => {
         // 8. Update the game session
         currentRound.votes.push(newVote._id);
         await game.save();
-        io.to(gameId).emit('gameUpdate', game);
+        io.to(gameId).emit('voteSubmitted', { username, punchlineId });
+
     
         return { message: 'Vote submitted successfully' };
       } catch (error) {
@@ -251,7 +345,7 @@ exports.submitPunchline = async (io, gameId, username, newsArticleId, punchlineT
         // 6. Update the game session
         currentRound.punchlines.push(newPunchline._id);
         await game.save();
-        io.to(gameId).emit('gameUpdate', game);
+        io.to(gameId).emit('punchlineSubmitted', { username, promptId });
         return { 
         message: 'Punchline submitted successfully',
         punchlineId: newPunchline.punchlineId

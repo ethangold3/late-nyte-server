@@ -1,4 +1,4 @@
-require('dotenv').config({ path: '../../.env' });
+require('dotenv').config();
 const axios = require('axios');
 const mongoose = require('mongoose');
 const NewsPrompt = require('../models/NewsArticle');
